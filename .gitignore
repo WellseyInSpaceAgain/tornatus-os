@@ -1,0 +1,5 @@
+*.qcow2
+*.iso
+*.img
+*.log
+.vscode/
