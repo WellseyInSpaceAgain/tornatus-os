@@ -42,7 +42,10 @@ Snapper `50-etc` plugin was included in the `tukit` package.
 | 4 | Added `/etc/tornatus-m0-transaction` | Change activated, then rolled back |
 | 5 | Automatic timeline snapshot | Created by Snapper's enabled timer |
 | 6 | Removed `rootflags=subvol=root` from `/etc/kernel/cmdline` | Known-good normal boot |
-| 7 | Added an attempted `/.snapshots` fstab entry | Entered emergency mode on boot |
+| 7 | Added mistyped `./snapshots` fstab target | Entered emergency mode; preserved for inspection |
+| 8 | Automatic timeline snapshot | Created by Snapper's enabled timer |
+| 9 | Corrected the target to `/.snapshots` | Normal boot; repository mounted automatically |
+| 10 | No-op transaction based on snapshot 9 | Normal boot; verified repeatable steady state |
 
 Numeric Btrfs IDs observed during the experiment included:
 
@@ -54,6 +57,8 @@ Numeric Btrfs IDs observed during the experiment included:
 262  Snapper snapshot 3
 263  Snapper snapshot 4
 265  Snapper snapshot 6
+268  Snapper snapshot 9
+269  Snapper snapshot 10
 ```
 
 ## Successful Milestone 0 proof
@@ -66,22 +71,21 @@ The experiment demonstrated:
 4. `tukit rollback 3` selected the earlier root; and
 5. reboot activated snapshot 3 and removed the change from view.
 
-See `docs/architecture.md` for the detailed findings and caveats.
+The experiment subsequently demonstrated a second complete transaction and
+normal boot with no GRUB edit or manual repository mount. See
+`docs/architecture.md` for the detailed findings and caveats.
 
-## Current VM state and recovery
+## Snapshot 7 failure and recovery
 
-The latest boot attempted snapshot 7 and entered emergency mode after adding
-this entry to its `/etc/fstab`:
+Snapshot 7 entered emergency mode because its `/etc/fstab` target was mistyped:
 
 ```text
-UUID=806b48e0-565d-4369-9649-dc3ec39c8169 /.snapshots btrfs subvol=root/.snapshots,compress=zstd:1 0 0
+UUID=806b48e0-565d-4369-9649-dc3ec39c8169 ./snapshots btrfs subvol=root/.snapshots,compress=zstd:1 0 0
 ```
 
-The equivalent interactive mount had succeeded, so the boot failure remains
-unexplained. The root account is locked, preventing login at the emergency
-prompt.
-
-Snapshot 6 is the last known-good root. A non-destructive recovery path is:
+The relative `./snapshots` target was not the intended absolute hidden path
+`/.snapshots`. The root account was locked at the emergency prompt. Recovery
+was performed non-destructively:
 
 1. reboot to GRUB;
 2. edit the normal Fedora entry for one boot;
@@ -92,7 +96,7 @@ Snapshot 6 is the last known-good root. A non-destructive recovery path is:
    ```
 
 4. boot snapshot 6;
-5. temporarily mount the shared repository if necessary:
+5. mount the shared repository:
 
    ```bash
    sudo mount -t btrfs \
@@ -101,9 +105,39 @@ Snapshot 6 is the last known-good root. A non-destructive recovery path is:
      /.snapshots
    ```
 
-6. inspect logs from the failed snapshot 7 boot before changing or deleting
-   anything;
-7. select snapshot 6 as default after the evidence has been collected.
+6. preserve and inspect snapshot 7;
+7. run `sudo tukit rollback 6` to select snapshot 6 as default.
+
+The journal inside snapshot 7 contained only older persistent records; the
+failed boot had logged to volatile storage and those records were lost on
+reboot. Comparing `/etc/fstab` in snapshots 6 and 7 revealed the typo.
+
+## Current VM state
+
+Snapshot 9 added the corrected entry:
+
+```text
+UUID=806b48e0-565d-4369-9649-dc3ec39c8169 /.snapshots btrfs subvol=root/.snapshots,compress=zstd:1 0 0
+```
+
+It booted normally and mounted the shared repository automatically. From that
+state, this ordinary transaction created snapshot 10:
+
+```bash
+sudo tukit execute /usr/bin/true
+```
+
+A normal reboot selected snapshot 10 without a GRUB edit. The verified current
+mounts are:
+
+```text
+/           /dev/vda3[/root/.snapshots/10/snapshot]  subvolid=269
+/.snapshots /dev/vda3[/root/.snapshots]              subvolid=258
+```
+
+Tukit reports snapshot 10 as both active and default. Snapshot 7 remains
+available as evidence of the failed configuration. Persistent journald storage
+for read-only transactional roots remains unresolved.
 
 The powered-off `fresh-f44-before-snapper` checkpoint remains the broader
 fallback.

@@ -13,9 +13,9 @@ tukit to:
 3. activate the new state on reboot; and
 4. roll back to the previous state?
 
-The core transaction and rollback behavior has been demonstrated. Several
-Fedora integration requirements and one unresolved boot failure were also
-identified.
+The core transaction, rollback, and repeatable steady-state behavior has been
+demonstrated. Several Fedora integration requirements and a persistent logging
+gap were also identified.
 
 ## Test environment
 
@@ -204,19 +204,35 @@ With this mount present, tukit correctly reported a running numbered snapshot
 as `active=yes` and could perform ordinary transactions without an explicit
 `--continue` base.
 
-A matching `/etc/fstab` entry was then tested in snapshot 7:
+A first attempt to add a matching `/etc/fstab` entry in snapshot 7 contained a
+transcription error:
+
+```text
+UUID=806b48e0-565d-4369-9649-dc3ec39c8169 ./snapshots btrfs subvol=root/.snapshots,compress=zstd:1 0 0
+```
+
+The target was `./snapshots`, not the intended absolute hidden path
+`/.snapshots`. Booting snapshot 7 therefore entered emergency mode. Because the
+root account was locked, recovery used a one-time GRUB kernel argument to boot
+known-good snapshot 6 directly:
+
+```text
+rootflags=subvol=root/.snapshots/6/snapshot
+```
+
+After mounting the shared repository, `tukit rollback 6` restored snapshot 6
+as the default while preserving failed snapshot 7 for inspection.
+
+Snapshot 9 then added the corrected entry transactionally:
 
 ```text
 UUID=806b48e0-565d-4369-9649-dc3ec39c8169 /.snapshots btrfs subvol=root/.snapshots,compress=zstd:1 0 0
 ```
 
-Although the exact mount command worked interactively, booting snapshot 7 with
-this entry entered emergency mode. The root account was locked, so the cause
-could not be inspected from the emergency console. The entry must **not** be
-treated as validated persistent configuration. The next experiment is to boot
-known-good snapshot 6, collect logs from the failed boot, and determine whether
-the failure is caused by mount ordering, the `fstab` root entry, or another
-systemd/initramfs interaction.
+A normal boot into snapshot 9 succeeded. `findmnt` confirmed that `/` used
+`/root/.snapshots/9/snapshot` (subvolume ID 268) while `/.snapshots` was a
+separate mount of `/root/.snapshots` (subvolume ID 258). Tukit then recognized
+snapshot 9 as both active and default without a manual repository mount.
 
 ## Transaction isolation and activation
 
@@ -247,6 +263,29 @@ Observed behavior:
 
 This demonstrates isolation of a change from the running system followed by
 activation on reboot.
+
+## Repeatable steady-state transaction
+
+With snapshot 9 active and the corrected repository mount supplied by
+`/etc/fstab`, a further no-op transaction required no bootstrap options or
+manual mount:
+
+```bash
+sudo tukit execute /usr/bin/true
+```
+
+Tukit used snapshot 9 as its base, created snapshot 10, and selected snapshot
+10 as default. A normal reboot reached the login prompt without a GRUB edit.
+Post-boot checks showed:
+
+```text
+/           /dev/vda3[/root/.snapshots/10/snapshot]  subvolid=269
+/.snapshots /dev/vda3[/root/.snapshots]              subvolid=258
+```
+
+Tukit reported snapshot 10 as both `active=yes` and `default=yes`. This proves
+the complete steady-state loop: transact, select the new default, reboot into
+it, retain access to the shared repository, and transact again.
 
 ## Rollback
 
@@ -303,6 +342,25 @@ periodic cleanup timer is disabled, despite cleanup policies being present in
 the Snapper config. Tornatus will need to make an explicit policy decision
 later; no policy change was made during this experiment.
 
+## Failed-boot journal inspection
+
+Snapshot 7 contained a persistent journal directory, but its journal only held
+older entries through the initial snapshot creation. The emergency boot itself
+was not present after reboot. The read-only transactional roots had fallen back
+to volatile journal storage, so the relevant records disappeared when the VM
+rebooted.
+
+The `fstab` error was instead established by comparing the preserved failed
+snapshot with the active root:
+
+```bash
+sudo diff -u /etc/fstab /.snapshots/7/snapshot/etc/fstab
+```
+
+This preserved-snapshot comparison was sufficient to expose `./snapshots` as
+the cause. Persistent journald storage for read-only roots remains an
+integration problem to solve.
+
 ## Proven and unresolved
 
 Proven on this Fedora 44 VM:
@@ -314,6 +372,10 @@ Proven on this Fedora 44 VM:
 - Reboot activates the new root.
 - Tukit rollback selects an earlier root, and reboot activates it.
 - Active transactional roots are Btrfs read-only.
+- A corrected `/.snapshots` `fstab` entry mounts the shared repository during
+  boot.
+- The transaction and normal-boot cycle repeats without manual GRUB or mount
+  intervention.
 
 Observed integration requirements:
 
@@ -326,9 +388,7 @@ Observed integration requirements:
 
 Still unresolved:
 
-- why the interactively validated `/.snapshots` mount entered emergency mode
-  when added to `/etc/fstab`;
-- the correct persistent mount and boot ordering for the Snapper repository;
+- persistent journald storage across failed boots of read-only roots;
 - whether the installer-generated root `fstab` entry should be changed;
 - the desired automatic snapshot and cleanup policy;
 - final persistent-state boundaries for `/etc`, `/var`, and `/home`.
